@@ -1,0 +1,88 @@
+#!groovy
+// Run this node on a Maven Slave
+// Maven Slaves have JDK and Maven already installed
+node()
+{
+    def server = Artifactory.server 'artifactory'
+    def rtMaven = Artifactory.newMavenBuild() 
+    rtMaven.tool = 'M2_HOME'
+    
+
+    stage('Checkout Source')
+    {
+      git changelog: false, credentialsId: 'git', poll: false, url: 'http://admin@dc1-p-a-opn-tcagt01.odfl.com:7990/scm/ocp/customer-lookup.git'
+    }
+
+    // The following variables need to be defined at the top level and not inside
+    def groupId    = getGroupIdFromPom("pom.xml")
+    def artifactId = getArtifactIdFromPom("pom.xml")
+    def version    = getVersionFromPom("pom.xml")
+
+    stage('Build jar')
+    {
+        echo "Building version ${version}"
+        def buildInfo = rtMaven.run pom: './pom.xml', goals: 'clean compile package'
+        server.publishBuildInfo buildInfo
+    }
+
+    stage('Unit Tests')
+    {
+        echo "Unit Tests"
+        //sh "${mvnCmd} test"
+    }
+
+    stage('Code Analysis')
+    {
+        echo "Code Analysis"
+    }
+
+    stage('Publish .jar to Artifactory')
+    {
+        echo "Publish to Artifactory"
+        sh "mv ${TARGET_PATH}/customer-lookup-ws-application.jar ${TARGET_PATH}/customer-lookup-ws-application-1.0.0-SNAPSHOT.jar"
+        
+        def uploadSpec = """{
+          "files": [
+            {
+              "pattern": "${TARGET_PATH}/customer-lookup-ws-application-1.0.0-SNAPSHOT.jar",
+              "target": "docker-snapshot-local/customer/artifact/"
+            }
+          ]
+        }""" 
+        server.upload(uploadSpec)
+    }
+
+    stage('Docker Build and Push')
+    {
+        docker.withRegistry('http://docker-snapshot-local.build-repo.corp.odfl.com:8081','artifactory'){
+          def customImage = docker.build("customer/customer-lookup-ws:latest")
+          customImage.push()
+        }        
+    }
+
+    stage('Deploy to OpenShift')
+    {
+        // Patch the DeploymentConfig so that it points to the latest TestingCandidate-${version} Image.
+       openshiftDeploy apiURL: '${OSE_API_URL}', authToken: '${OSE_AUTH}', depCfg: 'customer-lookup-ws', namespace: 'customer-lookup-dev', verbose: 'false', waitTime: '', waitUnit: 'sec'
+
+    }
+}
+
+// Convenience Functions to read variables from the pom.xml
+def getVersionFromPom(pom)
+{
+    def matcher = readFile(pom) =~ '<version>(.+)</version>'
+    matcher ? matcher[0][1] : null
+}
+
+def getGroupIdFromPom(pom)
+{
+    def matcher = readFile(pom) =~ '<groupId>(.+)</groupId>'
+    matcher ? matcher[0][1] : null
+}
+
+def getArtifactIdFromPom(pom)
+{
+    def matcher = readFile(pom) =~ '<artifactId>(.+)</artifactId>'
+    matcher ? matcher[0][1] : null
+}
